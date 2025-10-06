@@ -1,9 +1,10 @@
-// api.js — paging (1000 limitni aylanib o'tadi) + exact count + GET-only
+// api.js — GET-only, paging, exact count, Realtime (ALL public tables)
 window.Api = (() => {
   let client = null;
-  const init = () => (client ||= supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY));
+  const init = () =>
+    (client ||= supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY));
 
-  // ---- helper: exact count (head:true bilan GET) ----
+  // ---- exact count (HEAD) ----
   async function countExact(table, columns = 'id', filterFn) {
     const c = init();
     let q = c.from(table).select(columns, { count: 'exact', head: true });
@@ -13,7 +14,7 @@ window.Api = (() => {
     return count ?? 0;
   }
 
-  // ---- helper: fetch all rows with paging ----
+  // ---- paging select ----
   async function selectAll(table, columns, buildQuery, step = 1000, max = 200000) {
     const c = init();
     let out = [];
@@ -23,58 +24,66 @@ window.Api = (() => {
       q = q.range(from, from + step - 1);
       const { data, error } = await q;
       if (error) throw error;
-      out = out.concat(data || []);
+      if (data?.length) out.push(...data);
       if (!data || data.length < step) break;
     }
     return out;
   }
 
-  // ---- USERS (demografiya) ----
-  const fetchUsersAll = () =>
-    selectAll('users', 'id, lan, place, age, gender');
-
+  // ---- USERS ----
+  const fetchUsersAll   = () => selectAll('users', 'id, lan, place, age, gender');
   const countUsersExact = () => countExact('users', 'id');
 
-  // ---- AISUM (app + tgbot) ----
+  // ---- AISUM (normalize) ----
   const fetchAisumAll = async () => {
     const app = await selectAll(
       'aisum_app',
       'created_at, ai_message, topic, gender, chat_id',
-      (q) => q.order('created_at', { ascending: true })
+      q => q.order('created_at', { ascending: true })
     );
     const tg  = await selectAll(
       'aisum_tgbot',
       'created_at, ai_message, topic, doctor, chat_id',
-      (q) => q.order('created_at', { ascending: true })
+      q => q.order('created_at', { ascending: true })
     );
-    // normalize
-    const appN = app.map(r => ({ ...r, doctor: r.doctor ?? null }));
-    const tgN  = tg .map(r => ({ ...r, gender: r.gender ?? null }));
+    // teng maydonlarga keltirish
+    const appN = app.map(r => ({ ...r, doctor: null }));     // app’da doctor yo‘q
+    const tgN  = tg .map(r => ({ ...r, gender: null }));     // tgbot’da gender yo‘q
     return [...appN, ...tgN];
   };
 
-  const countAIMsgExact = () =>
-    countExact('aisum_app', 'ai_message')
-      .then(c1 => countExact('aisum_tgbot', 'ai_message').then(c2 => c1 + c2));
+  const countAIMsgExact = async () => {
+    const c1 = await countExact('aisum_app',  'ai_message', q => q.not('ai_message','is',null));
+    const c2 = await countExact('aisum_tgbot','ai_message', q => q.not('ai_message','is',null));
+    return c1 + c2;
+  };
 
-  // ---- RATING (engagement & avg) ----
-  const fetchRatingsAll = () =>
-    selectAll('rating', 'name, chat_count, average, rating_all');
+  // ---- RATING ----
+  const fetchRatingsAll = () => selectAll('rating', 'name, chat_count, average, rating_all');
 
-  // ---- CHAT HISTORY (avg session length) ----
-  const fetchChatApp = () =>
-    selectAll('chat_history_app', 'created_at, chat_id, ai_message, human_message');
-  const fetchChatTg = () =>
-    selectAll('chat_history_tg',  'created_at, chat_id, ai_message, human_message');
+  // ---- Chat history (optional) ----
+  const fetchChatApp = () => selectAll('chat_history_app', 'created_at, chat_id, ai_message, human_message');
+  const fetchChatTg  = () => selectAll('chat_history_tg',  'created_at, chat_id, ai_message, human_message');
+
+  // ---- Realtime: butun public sxema ----
+  function subscribeRealtimeAll(onChange) {
+    const c = init();
+    const ch = c
+      .channel('realtime:public_all')
+      .on('postgres_changes', { event: '*', schema: 'public' }, () => {
+        if (typeof onChange === 'function') onChange();
+      })
+      .subscribe((status) => console.log('[RT]', status));
+    return () => { try { c.removeChannel(ch); } catch(_) {} };
+  }
 
   return {
-    // users
+    // pulls
     fetchUsersAll, countUsersExact,
-    // aisum
     fetchAisumAll, countAIMsgExact,
-    // rating
     fetchRatingsAll,
-    // chat history
     fetchChatApp, fetchChatTg,
+    // realtime
+    subscribeRealtimeAll,
   };
 })();
